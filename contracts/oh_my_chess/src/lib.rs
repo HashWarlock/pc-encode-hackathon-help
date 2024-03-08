@@ -54,6 +54,11 @@ mod oh_my_chess {
             self.url = url.clone();
         }
 
+        #[ink(message)]
+        pub fn make_move(&self, chess_move: ChessMove, player_to_move: Player) {
+            // let is_valid_move = self.check_move_validity(&chess_move, &player_to_move);
+        }
+
         pub fn check_move_validity(&self, chess_move: &ChessMove, player_to_move: &Player, game_state: &GameState) -> bool {
             // Check if the move is within the board boundaries
             if chess_move.from.0 < 0 || chess_move.from.0 > 7 || chess_move.from.1 < 0 || chess_move.from.1 > 7 || chess_move.to.0 < 0 || chess_move.to.0 > 7 || chess_move.to.1 < 0 || chess_move.to.1 > 7 {
@@ -69,22 +74,85 @@ mod oh_my_chess {
                 return false;
             }
 
-            // let delta_row = (chess_move.from.0 as i8 - chess_move.to.0 as i8).abs();
-            // let delta_col = (chess_move.from.1 as i8 - chess_move.to.1 as i8).abs();
-
             let is_valid = match piece {
-                Piece::Pawn => true,
-                Piece::Knight => true,
-                Piece::Bishop => true,
-                Piece::Rook => true,
-                Piece::Queen => true,
-                Piece::King => true,
+                Piece::Pawn => self.check_move_validity_pawn(player_to_move, chess_move, game_state),
+                Piece::Knight => self.check_move_validity_knight(player_to_move, chess_move, game_state),
+                Piece::Bishop => self.check_bishop_move_validity(chess_move, game_state),
+                Piece::Rook => self.check_move_validity_rook(chess_move, game_state),
+                Piece::Queen => self.check_move_validity_queen(chess_move, game_state),
+                Piece::King => self.check_move_validity_king(chess_move),
             };
 
             is_valid
         }
 
-        fn check_move_validity_king(&self, chess_move: &ChessMove) -> bool {
+        pub fn check_move_validity_pawn(&self, player: &Player, chess_move: &ChessMove, game_state: &GameState) -> bool {
+            let (fx, fy) = chess_move.from;
+            let (tx, ty) = chess_move.to;
+
+            let forward = match player {
+                Player::White => 1,
+                Player::Black => -1,
+            };
+
+            // Check forward move
+            if fx as i32 + forward == tx as i32 && fy == ty {
+                return game_state.board[tx][ty].is_none();
+            }
+
+            // Check capture move
+            if fx as i32 + forward == tx as i32 && (fy as i32 - 1 == ty as i32 || fy as i32 + 1 == ty as i32) {
+                if let Some((_, piece_player)) = &game_state.board[tx as usize][ty as usize] {
+                    return *player != piece_player; // Capture if it's an opponent's piece
+                }
+            }
+
+            false
+        }
+
+        pub fn check_move_validity_knight(&self, player: &Player, chess_move: &ChessMove, game_state: &GameState) -> bool {
+            let (fx, fy, tx, ty) = (chess_move.from.0, chess_move.from.1, chess_move.to.0, chess_move.to.1);
+            let dx = (fx as i32 - tx as i32).abs();
+            let dy = (fy as i32 - ty as i32).abs();
+
+            // Check L-shape move
+            if (dx == 2 && dy == 1) || (dx == 1 && dy == 2) {
+                if let Some((_, piece_player)) = &game_state.board[tx as usize][ty as usize] {
+                    return *player != *piece_player; // Capture if there's an opponent piece
+                } else { true }
+            } else { false }
+
+        }
+
+        pub fn check_bishop_move_validity(&self, chess_move: &crate::oh_my_chess::ChessMove, game_state: &GameState) -> bool {
+            // Bishop can move diagonally
+            let is_diagonal = (chess_move.from.0 as i32 - chess_move.to.0 as i32).abs() == (chess_move.from.1 as i32 - chess_move.to.1 as i32).abs();
+
+            if is_diagonal {
+                // Diagonal move: Ensure the path is clear
+                self.is_path_clear(&(game_state.board), chess_move, &Direction::Diagonal)
+            } else {
+                false // Not a valid bishop move
+            }
+        }
+
+        pub fn check_move_validity_rook(&self, chess_move: &ChessMove, game_state: &GameState) -> bool {
+            // Rook can move horizontally or vertically
+            let is_horizontal = chess_move.from.0 == chess_move.to.0;
+            let is_vertical = chess_move.from.1 == chess_move.to.1;
+
+            if is_horizontal {
+                // Horizontal move: Ensure the path is clear
+                self.is_path_clear(&(game_state.board), chess_move, &Direction::Horizontal)
+            } else if is_vertical {
+                // Vertical move: Ensure the path is clear
+                self.is_path_clear(&(game_state.board), chess_move, &Direction::Vertical)
+            } else {
+                false // Not a valid rook move
+            }
+        }
+
+        pub fn check_move_validity_king(&self, chess_move: &ChessMove) -> bool {
             // Calculate the difference in the move for both axes
             let delta_row = (chess_move.from.0 as i8 - chess_move.to.0 as i8).abs();
             let delta_col = (chess_move.from.1 as i8 - chess_move.to.1 as i8).abs();
@@ -92,7 +160,7 @@ mod oh_my_chess {
             if delta_row <= 1 && delta_col <= 1 { true } else { false }
         }
 
-        fn check_move_validity_queen(&self, chess_move: &ChessMove, game_state: &GameState) -> bool {
+        pub fn check_move_validity_queen(&self, chess_move: &ChessMove, game_state: &GameState) -> bool {
             // Queen can move horizontally, vertically, or diagonally
             let from = chess_move.from;
             let to = chess_move.to;
