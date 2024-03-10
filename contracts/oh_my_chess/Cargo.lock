@@ -957,6 +957,7 @@ dependencies = [
  "atomic-polyfill",
  "hash32",
  "rustc_version",
+ "serde",
  "spin",
  "stable_deref_trait",
 ]
@@ -1730,6 +1731,8 @@ dependencies = [
 name = "oh_my_chess"
 version = "0.1.0"
 dependencies = [
+ "heapless",
+ "hex",
  "ink",
  "parity-scale-codec",
  "pink-extension",
