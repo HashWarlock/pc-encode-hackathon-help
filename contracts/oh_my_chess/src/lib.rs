@@ -13,17 +13,24 @@ mod oh_my_chess {
     use alloc::string::String;
     use alloc::format;
     use serde_json_core;
-    use crate::oh_my_chess::Error::{NoElementFoundInDB, ErrorFetchingFromDB};
+    use crate::oh_my_chess::Error::{ToIsOccupiedByOneOfYourPiece, PieceSelectedIsNotYours, NoPieceBoardChessFrom, OutOfBoardChessFrom, OutOfBoardChessTo, NonValidMove, NoElementFoundInDB, ErrorFetchingFromDB, NotAuthorized, NotYourTurn, YourNotInThisGameSession};
     use scale_info::TypeInfo;
 
 
     #[derive(Debug, PartialEq, Eq, Encode, Decode)]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum Error {
-        InvalidMove,
+        NonValidMove,
         NotYourTurn,
+        YourNotInThisGameSession,
         NoElementFoundInDB,
         ErrorFetchingFromDB,
+        NotAuthorized,
+        OutOfBoardChessFrom,
+        OutOfBoardChessTo,
+        NoPieceBoardChessFrom,
+        PieceSelectedIsNotYours,
+        ToIsOccupiedByOneOfYourPiece,
     }
     pub type Result<T> = core::result::Result<T, Error>;
     pub type Option<T> = core::option::Option<T>;
@@ -47,25 +54,96 @@ mod oh_my_chess {
             }
         }
 
+        pub fn is_admin(&self) -> bool {
+            Self::env().caller() == self.admin
+        }
+
         #[ink(message)]
         pub fn get_url(&self) -> Result<String> {
-            Ok(self.url.clone())
+            if self.is_admin() { Ok(self.url.clone()) }
+            else { Err(NotAuthorized) }
         }
 
         #[ink(message)]
-        pub fn set_url(&mut self, url: String) {
-            self.url = url.clone();
+        pub fn set_url(&mut self, url: String) -> bool {
+            if Self::env().caller() != self.admin { false }
+            else {
+                self.url = url;
+                true
+            }
         }
 
-        // #[ink(message)]
-        // pub fn make_move(&self, chess_move: ChessMove, player_to_move: Player) -> Result<bool, Error> {
-        //     let game_state = self.find_game_session_from_mongodb()?;
-        //
-        //     // let is_valid_move = self.check_move_validity(&chess_move, &game_state);
-        // }
+        #[ink(message)]
+        pub fn get_api_key(&self) -> Result<String> {
+            if self.is_admin() { Ok(self.api_key.clone()) }
+            else { Err(NotAuthorized) }
+        }
 
         #[ink(message)]
-        pub fn find_game_session_from_mongodb(&self, session_id: String) -> Result<GameState> {
+        pub fn set_api_key(&mut self, api_key: String) -> bool {
+            if Self::env().caller() != self.admin { false }
+            else {
+                self.api_key = api_key;
+                true
+            }
+        }
+
+        #[ink(message)]
+        pub fn make_move(&mut self, chess_move: ChessMove) -> Result<GameState> {
+            let mut game_state = self.find_game_session_from_mongodb()?;
+
+            Self::check_move_boundaries(&chess_move)?;
+            Self::check_caller_turn(&game_state)?;
+            Self::check_caller_owns_piece(&game_state, &chess_move)?;
+            Self::check_move_validity_for_piece(&game_state, &chess_move)?;
+
+            let (fx, fy) = chess_move.from;
+            let (tx, ty) = chess_move.to;
+            let chess_cell_option = &game_state.board[fx as usize][fy as usize];
+            game_state.board[fx as usize][fy as usize] = Some((*chess_cell_option).clone().unwrap());
+            game_state.board[tx as usize][ty as usize] = None;
+            Ok(game_state)
+        }
+
+        pub fn check_caller_owns_piece(game_state: &GameState, chess_move: &ChessMove) -> Result<()> {
+            let player_turn = &game_state.turn;
+
+            let ChessCell{ player: player_piece_from, .. } = match &game_state.board[chess_move.from.0 as usize][chess_move.from.1 as usize] {
+                Some(ref chess_cell) => chess_cell,
+                None => return Err(NoPieceBoardChessFrom), // No piece at source
+            };
+
+            if *player_turn != *player_piece_from {
+                return Err(PieceSelectedIsNotYours);
+            }
+
+            let ChessCell{ player: player_piece_to, .. } = match &game_state.board[chess_move.to.0 as usize][chess_move.to.1 as usize] {
+                Some(ref chess_cell) => chess_cell,
+                None => return Ok(()), // No piece at source
+            };
+
+            if *player_piece_to == *player_piece_from { Err(ToIsOccupiedByOneOfYourPiece) }
+            else { Ok(()) }
+        }
+
+        pub fn check_caller_turn(game_state: &GameState) -> Result<()> {
+            let caller = Self::env().caller();
+            let player = &game_state.turn;
+            let player_address = if *player == Player::Black { game_state.players.black } else { game_state.players.white };
+
+            if AccountId::from(player_address) != caller {
+                return Err(NotYourTurn);
+            }
+            if caller != AccountId::from(game_state.players.black) && caller != AccountId::from(game_state.players.white) {
+                // The caller is neither black nor white player, return YourNotInThisGameSession error
+                return Err(YourNotInThisGameSession);
+            }
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn find_game_session_from_mongodb(&self) -> Result<GameState> {
+            let session_id = String::from("65ede971e64bb9047421d3b3");
             let method = String::from("POST"); // HTTP Method for the request
             let url = format!("{}/action/findOne?_id={}", self.url, session_id);
 
@@ -98,36 +176,36 @@ mod oh_my_chess {
             game_state_res
         }
 
-        pub fn check_move_validity(&self, chess_move: &ChessMove, player_to_move: &Player, game_state: &GameState) -> bool {
-            // Check if the move is within the board boundaries
-            if chess_move.from.0 > 7 || chess_move.from.1 > 7 || chess_move.to.0 > 7 || chess_move.to.1 > 7 {
-                return false;
+        pub fn check_move_boundaries(chess_move: &ChessMove) -> Result<()> {
+            if chess_move.from.0 > 7 || chess_move.from.1 > 7 {
+                return Err(OutOfBoardChessFrom);
             }
-
-            let ChessCell{ player, piece } = match game_state.board[chess_move.from.0 as usize][chess_move.from.1 as usize] {
-                Some(ref chess_cell) => chess_cell,
-                None => return false, // No piece at source
-            };
-
-            if player_to_move != player {
-                return false;
+            if chess_move.to.0 > 7 || chess_move.to.1 > 7 {
+                return Err(OutOfBoardChessTo);
             }
-
-            let is_valid = match piece {
-                Piece::Pawn => self.check_move_validity_pawn(player_to_move, chess_move, game_state),
-                Piece::Knight => self.check_move_validity_knight(player_to_move, chess_move, game_state),
-                Piece::Bishop => self.check_bishop_move_validity(chess_move, game_state),
-                Piece::Rook => self.check_move_validity_rook(chess_move, game_state),
-                Piece::Queen => self.check_move_validity_queen(chess_move, game_state),
-                Piece::King => self.check_move_validity_king(chess_move),
-            };
-
-            is_valid
+            Ok(())
         }
 
-        pub fn check_move_validity_pawn(&self, player: &Player, chess_move: &ChessMove, game_state: &GameState) -> bool {
+        pub fn check_move_validity_for_piece(game_state: &GameState, chess_move: &ChessMove,) -> Result<()> {
+            let ChessCell{ piece, .. } = match &game_state.board[chess_move.from.0 as usize][chess_move.from.1 as usize] {
+                Some(ref chess_cell) => chess_cell,
+                None => return Err(NoPieceBoardChessFrom), // No piece at source
+            };
+
+            match piece {
+                Piece::Pawn => Self::check_move_validity_pawn(&game_state, &chess_move),
+                Piece::Knight => Self::check_move_validity_knight(&chess_move),
+                Piece::Bishop => Self::check_bishop_move_validity(&game_state, &chess_move),
+                Piece::Rook => Self::check_move_validity_rook(&game_state, &chess_move),
+                Piece::Queen => Self::check_move_validity_queen(&game_state, &chess_move),
+                Piece::King => Self::check_move_validity_king(&chess_move),
+            }
+        }
+
+        pub fn check_move_validity_pawn(game_state: &GameState, chess_move: &ChessMove) -> Result<()> {
             let (fx, fy) = chess_move.from;
             let (tx, ty) = chess_move.to;
+            let player = &game_state.turn;
 
             let forward = match player {
                 Player::White => 1,
@@ -135,71 +213,70 @@ mod oh_my_chess {
             };
 
             // Check forward move
-            if fx as i32 + forward == tx as i32 && fy == ty {
-                return game_state.board[tx as usize][ty as usize].is_none();
+            if fx as i32 + forward == tx as i32 && fy == ty && game_state.board[tx as usize][ty as usize].is_none() {
+                return Ok(());
             }
 
             // Check capture move
             if fx as i32 + forward == tx as i32 && (fy as i32 - 1 == ty as i32 || fy as i32 + 1 == ty as i32) {
                 if let Some(ChessCell{player: piece_player, ..}) = &game_state.board[tx as usize][ty as usize] {
-                    return *player != *piece_player; // Capture if it's an opponent's piece
+                    if *player != *piece_player {
+                        // Capture if it's an opponent's piece
+                        return Ok(())
+                    }
                 }
             }
 
-            false
+            Err(NonValidMove)
         }
 
-        pub fn check_move_validity_knight(&self, player: &Player, chess_move: &ChessMove, game_state: &GameState) -> bool {
+        pub fn check_move_validity_knight(chess_move: &ChessMove) -> Result<()> {
             let (fx, fy, tx, ty) = (chess_move.from.0, chess_move.from.1, chess_move.to.0, chess_move.to.1);
             let dx = (fx as i32 - tx as i32).abs();
             let dy = (fy as i32 - ty as i32).abs();
 
             // Check L-shape move
-            if (dx == 2 && dy == 1) || (dx == 1 && dy == 2) {
-                if let Some(ChessCell{player: piece_player, ..}) = &game_state.board[tx as usize][ty as usize] {
-                    return *player != *piece_player; // Capture if there's an opponent piece
-                } else { true }
-            } else { false }
-
+            if (dx == 2 && dy == 1) || (dx == 1 && dy == 2) { Ok(()) } else { Err(NonValidMove) }
         }
 
-        pub fn check_bishop_move_validity(&self, chess_move: &ChessMove, game_state: &GameState) -> bool {
+        pub fn check_bishop_move_validity(game_state: &GameState, chess_move: &ChessMove) -> Result<()> {
             // Bishop can move diagonally
             let is_diagonal = (chess_move.from.0 as i32 - chess_move.to.0 as i32).abs() == (chess_move.from.1 as i32 - chess_move.to.1 as i32).abs();
 
             if is_diagonal {
                 // Diagonal move: Ensure the path is clear
-                self.is_path_clear(&(game_state.board), chess_move, &Direction::Diagonal)
-            } else {
-                false // Not a valid bishop move
-            }
+                if Self::is_path_clear(&(game_state.board), chess_move, &Direction::Diagonal) { Ok(()) }
+                else { Err(NonValidMove) }
+            } else { Err(NonValidMove) }
         }
 
-        pub fn check_move_validity_rook(&self, chess_move: &ChessMove, game_state: &GameState) -> bool {
+        pub fn check_move_validity_rook(game_state: &GameState, chess_move: &ChessMove) -> Result<()> {
             // Rook can move horizontally or vertically
             let is_horizontal = chess_move.from.0 == chess_move.to.0;
             let is_vertical = chess_move.from.1 == chess_move.to.1;
 
             if is_horizontal {
                 // Horizontal move: Ensure the path is clear
-                self.is_path_clear(&(game_state.board), chess_move, &Direction::Horizontal)
+                if Self::is_path_clear(&(game_state.board), chess_move, &Direction::Horizontal) { Ok(()) }
+                else { Err(NonValidMove) }
             } else if is_vertical {
                 // Vertical move: Ensure the path is clear
-                self.is_path_clear(&(game_state.board), chess_move, &Direction::Vertical)
+                if Self::is_path_clear(&(game_state.board), chess_move, &Direction::Vertical) { Ok(()) }
+                else { Err(NonValidMove) }
             } else {
-                false // Not a valid rook move
+                Err(NonValidMove)
             }
         }
 
-        pub fn check_move_validity_king(&self, chess_move: &ChessMove) -> bool {
+        pub fn check_move_validity_king(chess_move: &ChessMove) -> Result<()> {
             // Calculate the difference in the move for both axes
             let delta_row = (chess_move.from.0 as i8 - chess_move.to.0 as i8).abs();
             let delta_col = (chess_move.from.1 as i8 - chess_move.to.1 as i8).abs();
 
-            if delta_row <= 1 && delta_col <= 1 { true } else { false }
+            if delta_row <= 1 && delta_col <= 1 { Ok(()) } else { Err(NonValidMove) }
         }
 
-        pub fn check_move_validity_queen(&self, chess_move: &ChessMove, game_state: &GameState) -> bool {
+        pub fn check_move_validity_queen(game_state: &GameState, chess_move: &ChessMove) -> Result<()> {
             // Queen can move horizontally, vertically, or diagonally
             let from = chess_move.from;
             let to = chess_move.to;
@@ -208,17 +285,20 @@ mod oh_my_chess {
             let is_diagonal = (from.0 as i32 - to.0 as i32).abs() == (from.1 as i32 - to.1 as i32).abs();
 
             if is_horizontal {
-                self.is_path_clear(&(game_state.board), chess_move, &Direction::Horizontal)
+                if Self::is_path_clear(&(game_state.board), chess_move, &Direction::Horizontal) { Ok(()) }
+                else { Err(NonValidMove) }
             } else if is_vertical {
-                self.is_path_clear(&(game_state.board), chess_move, &Direction::Vertical)
+                if Self::is_path_clear(&(game_state.board), chess_move, &Direction::Vertical) { Ok(()) }
+                else { Err(crate::oh_my_chess::Error::NonValidMove) }
             } else if is_diagonal {
-                self.is_path_clear(&(game_state.board), chess_move, &Direction::Diagonal)
+                if Self::is_path_clear(&(game_state.board), chess_move, &Direction::Diagonal) { Ok(()) }
+                else { Err(crate::oh_my_chess::Error::NonValidMove) }
             } else {
-                false // Not a valid queen move
+                Err(NonValidMove)
             }
         }
 
-        fn is_path_clear(&self, board: &[[Option<ChessCell>; 8]; 8], chess_move: &ChessMove, direction: &Direction) -> bool {
+        fn is_path_clear(board: &[[Option<ChessCell>; 8]; 8], chess_move: &ChessMove, direction: &Direction) -> bool {
             let from = chess_move.from;
             let to = chess_move.to;
             let (dx, dy) = (to.0 as i32 - from.0 as i32, to.1 as i32 - from.1 as i32);
@@ -297,14 +377,12 @@ mod oh_my_chess {
 
     #[derive(Encode, Decode, Deserialize, Serialize, Clone, Debug, PartialEq, TypeInfo)]
     pub struct ChessMove {
-        // Define your move structure
         from: (u8, u8),
         to: (u8, u8),
     }
 
     #[derive(Encode, Decode, Deserialize, Clone, Debug)]
     pub struct MongoDBDocument {
-        // Define your move structure
         document: Option<GameState>
     }
 
